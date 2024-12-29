@@ -62,6 +62,11 @@ This project includes a Python and C program to analyze stock prices and determi
     python value.py
     ```
 
+## BankApp
+- An application for managing bank accounts, transactions, and financial records.
+```pip install currencyconverter ```
+```pip install rich ```
+
 ## License
 
 This project is licensed under the [MIT License](LICENSE.md).
