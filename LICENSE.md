@@ -1,6 +1,6 @@
 MIT License
 
-Copyright (c) 2024 B.Tamer Akipek
+Copyright (c) 2024-2025 B.Tamer Akipek
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
