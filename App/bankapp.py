@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import datetime
 from plyer import notification
+from random import randrange
 
 conn = sqlite3.connect('./App/database.db')
 cursor = conn.cursor()
@@ -103,6 +104,34 @@ def get_current_date_in_roman():
     year = int_to_roman(now.year)
     return f"{day}/{month}/{year}"
 
+def totalcoin(selected_coin):
+    def applycoin(current_total):
+        return current_total + selected_coin
+    return applycoin
+
+def get_valid_coin():
+    while True:
+        slctcoin = input("You can select 50c, 25c, 10c, 5c, 1c: ")
+        if slctcoin in ("50", "25", "10", "5", "1"):
+            return int(slctcoin)
+        else:
+            print("Invalid input. Please enter one of the following values: 50, 25, 10, 5, 1.")
+
+def play_coin_guess_game():
+    coinr = randrange(1, 101)
+    ttlslctcoin = 0
+    while True:
+        slctcoin = get_valid_coin()
+        ttlslctcoin = totalcoin(slctcoin)(ttlslctcoin)
+        print(f"Your coin value is {ttlslctcoin}c")
+
+        if ttlslctcoin == coinr:
+            print("Congratulations! You won the game.")
+            break
+        elif ttlslctcoin > coinr:
+            print("Sorry, you have exceeded the target value. You lose.")
+            break
+
 def main_menu():
     os.system("cls")
     date_in_roman = get_current_date_in_roman()
@@ -116,6 +145,7 @@ def main_menu():
     print(Fore.CYAN + "    2) I Want to Become a Customer" + Style.RESET_ALL)
     print(Fore.CYAN + "    3) Search Current Currency Rates" + Style.RESET_ALL)
     print(Fore.CYAN + "    4) Customer List (Admin Only)" + Style.RESET_ALL)
+    print(Fore.CYAN + "    5) Play Coin Guess Game" + Style.RESET_ALL)
     print("")
 
 def customer_menu(customer):
@@ -332,6 +362,10 @@ while True:
         else:
             print("Incorrect Password")
             print(Fore.RED + "Hint: adminpass" + Style.RESET_ALL)
+        input("Press Enter to Return to Main Menu")
+
+    elif choice == 5:
+        play_coin_guess_game()
         input("Press Enter to Return to Main Menu")
 
     else:
