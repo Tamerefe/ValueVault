@@ -5,7 +5,6 @@ import sys
 import os
 
 from PyQt5 import QtWidgets, QtGui, QtCore
-from PyQt5.QtSvg import QSvgRenderer
 import sqlite3
 import json
 import urllib.request
@@ -111,27 +110,28 @@ def fetch_stock_quotes(symbols):
     # If all APIs fail, return mock data
     return _get_fallback_quotes(symbols)
 
-def _fetch_yahoo_quotes(symbols):
-    """Fetch from Yahoo Finance"""
-    joined = ",".join(symbols)
-    url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={joined}"
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
-    with urllib.request.urlopen(req, timeout=6) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    results = data.get("quoteResponse", {}).get("result", [])
-    if not results:
+def _fetch_yahoo_quotes(symbols, chunk_size=12):
+    """Fetch from Yahoo Finance in chunks to avoid truncation and return all rows."""
+    if not symbols:
         return []
-    
     rows = []
-    for item in results:
-        rows.append({
-            "symbol": item.get("symbol", "-"),
-            "name": item.get("shortName") or item.get("longName") or item.get("symbol", "-"),
-            "price": item.get("regularMarketPrice"),
-            "change": item.get("regularMarketChange"),
-            "changePercent": item.get("regularMarketChangePercent"),
-            "currency": item.get("currency", "USD"),
-        })
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    for i in range(0, len(symbols), chunk_size):
+        joined = ",".join(symbols[i:i+chunk_size])
+        url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={joined}"
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        results = data.get("quoteResponse", {}).get("result", [])
+        for item in results:
+            rows.append({
+                "symbol": item.get("symbol", "-"),
+                "name": item.get("shortName") or item.get("longName") or item.get("symbol", "-"),
+                "price": item.get("regularMarketPrice"),
+                "change": item.get("regularMarketChange"),
+                "changePercent": item.get("regularMarketChangePercent"),
+                "currency": item.get("currency", "USD"),
+            })
     return rows
 
 def _fetch_alphavantage_quotes(symbols):
@@ -163,9 +163,10 @@ def _fetch_alphavantage_quotes(symbols):
 def _fetch_finnhub_quotes(symbols):
     """Fetch from Finnhub free tier"""
     rows = []
+    token = os.getenv("FINNHUB_TOKEN", "demo")  # .env/ortamdan al
     for symbol in symbols[:5]:  # Limit requests
         try:
-            url = f"https://finnhub.io/api/v1/quote?symbol={symbol}&token=demo"
+            url = f"https://finnhub.io/api/v1/quote?symbol={symbol}&token={token}"
             req = urllib.request.Request(url, headers={"User-Agent": "ValueVault/1.0"})
             with urllib.request.urlopen(req, timeout=4) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
@@ -244,6 +245,401 @@ def _parse_currencyapi_rates(data, symbols):
         if symbol_value:
             result[symbol] = try_value / symbol_value
     return result
+
+
+def fetch_precious_metals():
+    """Fetch precious metals prices from multiple APIs with fallback."""
+    
+    # Try multiple APIs for better reliability
+    apis = [
+        # API 1: MetalsAPI (free tier)
+        {
+            "url": "https://api.metals.live/v1/spot",
+            "parser": lambda data: _parse_metals_live(data)
+        },
+        # API 2: Alternative API
+        {
+            "url": "https://api.goldapi.io/api/XAU/USD",
+            "parser": lambda data: _parse_goldapi(data)
+        }
+    ]
+    
+    for api in apis:
+        try:
+            req = urllib.request.Request(api["url"], headers={"User-Agent": "ValueVault/1.0"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            result = api["parser"](data)
+            if result:  # If we got valid data, return it
+                return result
+        except Exception:
+            continue  # Try next API
+    
+    # If all APIs fail, return fallback prices (approximate values in USD)
+    return _get_fallback_metals()
+
+def _parse_metals_live(data):
+    """Parse metals.live API response"""
+    try:
+        metals = {}
+        if "gold" in data:
+            metals["XAU"] = {"name": "Altın", "price": data["gold"], "unit": "ons", "currency": "USD"}
+        if "silver" in data:
+            metals["XAG"] = {"name": "Gümüş", "price": data["silver"], "unit": "ons", "currency": "USD"}
+        if "platinum" in data:
+            metals["XPT"] = {"name": "Platin", "price": data["platinum"], "unit": "ons", "currency": "USD"}
+        if "palladium" in data:
+            metals["XPD"] = {"name": "Paladyum", "price": data["palladium"], "unit": "ons", "currency": "USD"}
+        return metals
+    except Exception:
+        return {}
+
+def _parse_goldapi(data):
+    """Parse goldapi.io response"""
+    try:
+        metals = {}
+        if "price" in data:
+            metals["XAU"] = {"name": "Altın", "price": data["price"], "unit": "ons", "currency": "USD"}
+        return metals
+    except Exception:
+        return {}
+
+def _get_fallback_metals():
+    """Return mock precious metals data when all APIs fail"""
+    return {
+        "XAU": {"name": "Altın", "price": 2050.50, "unit": "ons", "currency": "USD"},
+        "XAG": {"name": "Gümüş", "price": 24.75, "unit": "ons", "currency": "USD"},
+        "XPT": {"name": "Platin", "price": 1025.80, "unit": "ons", "currency": "USD"},
+        "XPD": {"name": "Paladyum", "price": 1150.30, "unit": "ons", "currency": "USD"}
+    }
+
+
+def fetch_crypto_prices():
+    """Fetch cryptocurrency prices from multiple APIs with fallback."""
+    
+    # Try multiple APIs for better reliability
+    apis = [
+        # API 1: CoinGecko (free, no API key needed)
+        {
+            "url": "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,binancecoin,cardano,solana,ripple,dogecoin,polygon,litecoin,chainlink,avalanche-2,uniswap&vs_currencies=usd&include_24hr_change=true",
+            "parser": lambda data: _parse_coingecko_prices(data)
+        },
+        # API 2: CoinCap (backup)
+        {
+            "url": "https://api.coincap.io/v2/assets?limit=12",
+            "parser": lambda data: _parse_coincap_prices(data)
+        }
+    ]
+    
+    for api in apis:
+        try:
+            req = urllib.request.Request(api["url"], headers={"User-Agent": "ValueVault/1.0"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            result = api["parser"](data)
+            if result:  # If we got valid data, return it
+                return result
+        except Exception:
+            continue  # Try next API
+    
+    # If all APIs fail, return fallback prices
+    return _get_fallback_crypto()
+
+def _parse_coingecko_prices(data):
+    """Parse CoinGecko API response"""
+    try:
+        crypto_mapping = {
+            "bitcoin": {"name": "Bitcoin", "symbol": "BTC"},
+            "ethereum": {"name": "Ethereum", "symbol": "ETH"},
+            "binancecoin": {"name": "BNB", "symbol": "BNB"},
+            "cardano": {"name": "Cardano", "symbol": "ADA"},
+            "solana": {"name": "Solana", "symbol": "SOL"},
+            "ripple": {"name": "XRP", "symbol": "XRP"},
+            "dogecoin": {"name": "Dogecoin", "symbol": "DOGE"},
+            "polygon": {"name": "Polygon", "symbol": "MATIC"},
+            "litecoin": {"name": "Litecoin", "symbol": "LTC"},
+            "chainlink": {"name": "Chainlink", "symbol": "LINK"},
+            "avalanche-2": {"name": "Avalanche", "symbol": "AVAX"},
+            "uniswap": {"name": "Uniswap", "symbol": "UNI"}
+        }
+        
+        cryptos = []
+        for coin_id, coin_data in data.items():
+            if coin_id in crypto_mapping:
+                info = crypto_mapping[coin_id]
+                price = coin_data.get("usd", 0)
+                change_24h = coin_data.get("usd_24h_change", 0)
+                
+                cryptos.append({
+                    "symbol": info["symbol"],
+                    "name": info["name"],
+                    "price": price,
+                    "change24h": change_24h,
+                    "currency": "USD"
+                })
+        
+        return cryptos
+    except Exception:
+        return []
+
+def _parse_coincap_prices(data):
+    """Parse CoinCap API response"""
+    try:
+        cryptos = []
+        assets = data.get("data", [])
+        
+        for asset in assets[:12]:  # Top 12
+            price = float(asset.get("priceUsd", 0))
+            change_24h = float(asset.get("changePercent24Hr", 0))
+            
+            cryptos.append({
+                "symbol": asset.get("symbol", ""),
+                "name": asset.get("name", ""),
+                "price": price,
+                "change24h": change_24h,
+                "currency": "USD"
+            })
+        
+        return cryptos
+    except Exception:
+        return []
+
+def _get_fallback_crypto():
+    """Return mock crypto data when all APIs fail"""
+    return [
+        {"symbol": "BTC", "name": "Bitcoin", "price": 65000.0, "change24h": 2.5, "currency": "USD"},
+        {"symbol": "ETH", "name": "Ethereum", "price": 3200.0, "change24h": 1.8, "currency": "USD"},
+        {"symbol": "BNB", "name": "BNB", "price": 580.0, "change24h": -0.5, "currency": "USD"},
+        {"symbol": "ADA", "name": "Cardano", "price": 0.85, "change24h": 3.2, "currency": "USD"},
+        {"symbol": "SOL", "name": "Solana", "price": 145.0, "change24h": -1.2, "currency": "USD"},
+        {"symbol": "XRP", "name": "XRP", "price": 0.75, "change24h": 1.5, "currency": "USD"},
+        {"symbol": "DOGE", "name": "Dogecoin", "price": 0.12, "change24h": 4.8, "currency": "USD"},
+        {"symbol": "MATIC", "name": "Polygon", "price": 1.25, "change24h": 2.1, "currency": "USD"},
+        {"symbol": "LTC", "name": "Litecoin", "price": 95.0, "change24h": -0.8, "currency": "USD"},
+        {"symbol": "LINK", "name": "Chainlink", "price": 18.5, "change24h": 1.9, "currency": "USD"},
+        {"symbol": "AVAX", "name": "Avalanche", "price": 42.0, "change24h": -2.1, "currency": "USD"},
+        {"symbol": "UNI", "name": "Uniswap", "price": 11.8, "change24h": 0.7, "currency": "USD"}
+    ]
+
+
+class NumpadWidget(QtWidgets.QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.password = ""
+        self.max_length = 4  # 4 haneli şifre
+        self.parent_dialog = None  # Dialog referansı
+        self.setupUI()
+    
+    def setupUI(self):
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Şifre gösterim alanı
+        self.password_display = QtWidgets.QLabel("Şifre Girin")
+        self.password_display.setAlignment(QtCore.Qt.AlignCenter)
+        self.password_display.setStyleSheet("""
+            QLabel {
+                background: #f8fafc;
+                color: #1f2937;
+                border: 2px solid #e5e7eb;
+                border-radius: 12px;
+                padding: 16px;
+                font-size: 18px;
+                font-weight: 600;
+                letter-spacing: 4px;
+                min-height: 20px;
+            }
+        """)
+        layout.addWidget(self.password_display)
+        
+        # Numpad grid
+        numpad_container = QtWidgets.QWidget()
+        numpad_layout = QtWidgets.QGridLayout(numpad_container)
+        numpad_layout.setSpacing(8)
+        numpad_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Sayı butonları (1-9)
+        for i in range(1, 10):
+            btn = self.create_numpad_button(str(i))
+            row = (i - 1) // 3
+            col = (i - 1) % 3
+            numpad_layout.addWidget(btn, row, col)
+        
+        # Alt sıra: Temizle, 0, Sil
+        clear_btn = self.create_numpad_button("C", special=True)
+        clear_btn.clicked.connect(self.clear_password)
+        numpad_layout.addWidget(clear_btn, 3, 0)
+        
+        zero_btn = self.create_numpad_button("0")
+        numpad_layout.addWidget(zero_btn, 3, 1)
+        
+        delete_btn = self.create_numpad_button("⌫", special=True)
+        delete_btn.clicked.connect(self.delete_last)
+        numpad_layout.addWidget(delete_btn, 3, 2)
+        
+        layout.addWidget(numpad_container)
+        
+    def create_numpad_button(self, text, special=False):
+        btn = QtWidgets.QPushButton(text)
+        btn.setFixedSize(70, 70)
+        btn.setCursor(QtCore.Qt.PointingHandCursor)
+        
+        if special:
+            btn.setStyleSheet("""
+                QPushButton {
+                    background: #f3f4f6;
+                    color: #6b7280;
+                    border: 2px solid #e5e7eb;
+                    border-radius: 12px;
+                    font-size: 16px;
+                    font-weight: 600;
+                }
+                QPushButton:hover {
+                    background: #e5e7eb;
+                    border: 2px solid #d1d5db;
+                }
+                QPushButton:pressed {
+                    background: #d1d5db;
+                    border: 3px solid #d1d5db;
+                }
+            """)
+        else:
+            btn.setStyleSheet("""
+                QPushButton {
+                    background: white;
+                    color: #1f2937;
+                    border: 2px solid #e5e7eb;
+                    border-radius: 12px;
+                    font-size: 20px;
+                    font-weight: 700;
+                }
+                QPushButton:hover {
+                    background: #3b82f6;
+                    color: white;
+                    border: 2px solid #3b82f6;
+                }
+                QPushButton:pressed {
+                    background: #2563eb;
+                    border: 3px solid #2563eb;
+                }
+            """)
+            btn.clicked.connect(lambda checked=False, digit=text: self.add_digit(digit))
+        
+        return btn
+    
+    def add_digit(self, digit):
+        if len(self.password) < self.max_length:
+            self.password += digit
+            self.update_display()
+            
+            # 4. rakam girilince otomatik kapat
+            if len(self.password) == self.max_length and self.parent_dialog:
+                # Kısa bir gecikme ile kapatma (kullanıcı son rakamı görsün)
+                QtCore.QTimer.singleShot(300, self.parent_dialog.accept)
+    
+    def delete_last(self):
+        if self.password:
+            self.password = self.password[:-1]
+            self.update_display()
+    
+    def clear_password(self):
+        self.password = ""
+        self.update_display()
+    
+    def update_display(self):
+        if self.password:
+            # Şifreyi gizlemek için yıldız kullan
+            display_text = "●" * len(self.password)
+        else:
+            display_text = "Şifre Girin"
+        self.password_display.setText(display_text)
+    
+    def get_password(self):
+        return self.password
+
+
+class PasswordNumpadDialog(QtWidgets.QDialog):
+    def __init__(self, parent=None, max_length=4):  # 4 haneli şifre için
+        super().__init__(parent)
+        self.setModal(True)
+        self.setWindowFlags(QtCore.Qt.FramelessWindowHint | QtCore.Qt.Dialog)
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(0,0,0,0)
+        root.addStretch()
+        row = QtWidgets.QHBoxLayout()
+        row.addStretch()
+
+        card = QtWidgets.QFrame()
+        card.setStyleSheet("QFrame { background: white; border-radius: 16px; }")
+        card.setFixedSize(300, 480)
+        v = QtWidgets.QVBoxLayout(card)
+        v.setContentsMargins(12,12,12,12)
+        v.setSpacing(6)
+
+        title = QtWidgets.QLabel("Şifre")
+        title.setAlignment(QtCore.Qt.AlignCenter)
+        title.setStyleSheet("color:#111827; font-size:18px; font-weight:700;")
+        v.addWidget(title)
+
+        self.numpad = NumpadWidget()
+        self.numpad.max_length = max_length
+        self.numpad.parent_dialog = self  # Dialog referansını ver
+        v.addWidget(self.numpad)
+
+        btns = QtWidgets.QHBoxLayout()
+        ok = QtWidgets.QPushButton("Tamam")
+        cancel = QtWidgets.QPushButton("İptal")
+        
+        ok.setStyleSheet("""
+            QPushButton {
+                background: #3b82f6;
+                color: white;
+                border: none;
+                border-radius: 8px;
+                padding: 12px;
+                font-size: 14px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background: #2563eb;
+            }
+        """)
+        
+        cancel.setStyleSheet("""
+            QPushButton {
+                background: #f9fafb;
+                color: #6b7280;
+                border: 1px solid #e5e7eb;
+                border-radius: 8px;
+                padding: 12px;
+                font-size: 14px;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background: #f3f4f6;
+                color: #374151;
+            }
+        """)
+        
+        ok.setCursor(QtCore.Qt.PointingHandCursor)
+        cancel.setCursor(QtCore.Qt.PointingHandCursor)
+        ok.clicked.connect(self.accept)
+        cancel.clicked.connect(self.reject)
+        btns.addWidget(ok)
+        btns.addWidget(cancel)
+        v.addLayout(btns)
+
+        row.addWidget(card)
+        row.addStretch()
+        root.addLayout(row)
+        root.addStretch()
+        self.setStyleSheet("QDialog { background: rgba(0,0,0,0.45); }")
+
+    def value(self):
+        return self.numpad.get_password()
 
 
 class AppMessageDialog(QtWidgets.QDialog):
@@ -418,9 +814,10 @@ class StockListDialog(QtWidgets.QDialog):
         table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         table.setAlternatingRowColors(True)
         
-        # Kaydırma çubuklarını kaldır
-        table.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        table.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        # Kaydırma çubuklarını etkinleştir
+        table.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        table.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        table.setMinimumHeight(460)  # ekranda daha çok satır görünsün
         
         table.setStyleSheet("""
             QTableWidget { 
@@ -487,6 +884,126 @@ class StockListDialog(QtWidgets.QDialog):
         root.addLayout(row)
         root.addStretch()
         self.setStyleSheet("QDialog { background: rgba(0,0,0,0.45); }")
+
+
+class CryptoListDialog(QtWidgets.QDialog):
+    def __init__(self, parent, cryptos):
+        super().__init__(parent)
+        self.setModal(True)
+        self.setWindowFlags(QtCore.Qt.FramelessWindowHint | QtCore.Qt.Dialog)
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+
+        # full overlay sized to parent
+        if parent is not None:
+            self.resize(parent.width(), parent.height())
+            self.move(parent.mapToGlobal(QtCore.QPoint(0, 0)))
+
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.addStretch()
+
+        row = QtWidgets.QHBoxLayout()
+        row.addStretch()
+
+        card = QtWidgets.QFrame()
+        card.setStyleSheet("QFrame { background: white; border-radius: 16px; }")
+        card.setFixedSize(540, 650)
+        v = QtWidgets.QVBoxLayout(card)
+        v.setContentsMargins(16, 16, 16, 16)
+        v.setSpacing(10)
+
+        title = QtWidgets.QLabel("💰 Kripto Para Borsası")
+        title.setAlignment(QtCore.Qt.AlignCenter)
+        title.setStyleSheet("color:#111827; font-size:18px; font-weight:700;")
+        v.addWidget(title)
+
+        table = QtWidgets.QTableWidget()
+        table.setColumnCount(4)
+        table.setHorizontalHeaderLabels(["Sembol", "Ad", "Fiyat", "24h %"])
+        table.horizontalHeader().setStretchLastSection(True)
+        table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
+        table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        table.setAlternatingRowColors(True)
+        
+        table.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        table.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        table.setMinimumHeight(480)
+        
+        table.setStyleSheet("""
+            QTableWidget { 
+                background: white; 
+                color: #111827; 
+                gridline-color: #e5e7eb;
+                font-size: 12px;
+            }
+            QHeaderView::section { 
+                background: #f3f4f6; 
+                padding: 8px; 
+                border: none; 
+                font-weight: 600; 
+                font-size: 12px;
+            }
+            QTableWidget::item { 
+                padding: 8px; 
+                border-bottom: 1px solid #f3f4f6;
+            }
+        """)
+
+        table.setRowCount(len(cryptos))
+        for r, crypto in enumerate(cryptos):
+            symbol_item = QtWidgets.QTableWidgetItem(str(crypto.get("symbol", "-")))
+            name_item = QtWidgets.QTableWidgetItem(str(crypto.get("name", "-")))
+            
+            price_val = crypto.get("price")
+            if price_val is not None:
+                if price_val >= 1:
+                    price_text = f"${price_val:,.2f}"
+                else:
+                    price_text = f"${price_val:.6f}"
+            else:
+                price_text = "-"
+            price_item = QtWidgets.QTableWidgetItem(price_text)
+            
+            change_val = crypto.get("change24h")
+            if change_val is not None:
+                change_text = f"{change_val:+.2f}%"
+            else:
+                change_text = "-"
+            change_item = QtWidgets.QTableWidgetItem(change_text)
+
+            # colorize change
+            if isinstance(change_val, (int, float)):
+                color = "#10b981" if change_val >= 0 else "#ef4444"
+                change_item.setForeground(QtGui.QBrush(QtGui.QColor(color)))
+
+            table.setItem(r, 0, symbol_item)
+            table.setItem(r, 1, name_item)
+            table.setItem(r, 2, price_item)
+            table.setItem(r, 3, change_item)
+
+        table.resizeRowsToContents()
+        table.resizeColumnsToContents()
+        
+        v.addWidget(table)
+
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_row.addStretch()
+        close_btn = QtWidgets.QPushButton("Kapat")
+        close_btn.setFixedHeight(36)
+        close_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        close_btn.setStyleSheet("QPushButton { background: #1e40af; color: white; border: none; border-radius: 8px; padding: 0 16px; font-weight: 600; }")
+        close_btn.clicked.connect(self.accept)
+        btn_row.addWidget(close_btn)
+        btn_row.addStretch()
+        v.addLayout(btn_row)
+
+        row.addWidget(card)
+        row.addStretch()
+        root.addLayout(row)
+        root.addStretch()
+        self.setStyleSheet("QDialog { background: rgba(0,0,0,0.45); }")
+
 
 class AppNumberInputDialog(QtWidgets.QDialog):
     def __init__(self, parent, title, label, minimum=0, maximum=10**9, value=None):
@@ -570,11 +1087,12 @@ class AppNumberInputDialog(QtWidgets.QDialog):
 
 
 class Customer:
-    def __init__(self, id, password, name, balance=0):
+    def __init__(self, id, password, name, balance=0, investment_balance=0):
         self.id = id
         self.password = password
         self.name = name
         self.balance = balance
+        self.investment_balance = investment_balance
 
 class ModernMainWindow(QtWidgets.QMainWindow):
     def __init__(self):
@@ -609,7 +1127,28 @@ class ModernMainWindow(QtWidgets.QMainWindow):
                     id TEXT PRIMARY KEY,
                     password TEXT,
                     name TEXT,
-                    balance INTEGER
+                    balance INTEGER DEFAULT 0,
+                    investment_balance INTEGER DEFAULT 0
+                )
+            ''')
+            
+            # Ensure investment_balance column exists
+            cursor.execute("PRAGMA table_info(customers)")
+            cols = [r[1] for r in cursor.fetchall()]
+            if "investment_balance" not in cols:
+                cursor.execute("ALTER TABLE customers ADD COLUMN investment_balance INTEGER DEFAULT 0")
+            
+            # Create transactions table if it doesn't exist
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS transactions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    customer_id TEXT,
+                    transaction_type TEXT,
+                    amount INTEGER,
+                    target_customer TEXT,
+                    description TEXT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (customer_id) REFERENCES customers (id)
                 )
             ''')
             
@@ -620,10 +1159,10 @@ class ModernMainWindow(QtWidgets.QMainWindow):
             # Create admin account if it doesn't exist
             if not admin_exists:
                 cursor.execute('''
-                    INSERT INTO customers (id, password, name, balance) 
-                    VALUES (?, ?, ?, ?)
-                ''', ('admin', 'admin', 'Administrator', 100000))
-                print("Admin hesabı oluşturuldu: admin/admin")
+                    INSERT INTO customers (id, password, name, balance, investment_balance) 
+                    VALUES (?, ?, ?, ?, ?)
+                ''', ('admin', '1234', 'Administrator', 100000, 50000))
+                print("Admin hesabı oluşturuldu: admin/1234")
             
             conn.commit()
             conn.close()
@@ -714,18 +1253,36 @@ class ModernMainWindow(QtWidgets.QMainWindow):
 
         # Username input
         self.username = QtWidgets.QLineEdit()
-        self.username.setPlaceholderText("Username or Email")
+        self.username.setPlaceholderText("Kullanıcı Adı")
         self.username.setStyleSheet(self.mobile_input_style())
         self.username.setFixedHeight(50)
         bottom_layout.addWidget(self.username)
 
-        # Password input
+        # Şifre alanı (tıkla -> numpad aç)
         self.password = QtWidgets.QLineEdit()
-        self.password.setPlaceholderText("Password")
+        self.password.setPlaceholderText("Şifre (dokun ve numpad açılır)")
         self.password.setEchoMode(QtWidgets.QLineEdit.Password)
+        self.password.setReadOnly(True)
         self.password.setStyleSheet(self.mobile_input_style())
         self.password.setFixedHeight(50)
         bottom_layout.addWidget(self.password)
+
+        # Diyalogdan dönen gerçek şifre burada tutulacak
+        self._password_value = ""
+
+        # Tıklama ile numpad aç
+        def _open_password_numpad(event=None):
+            dlg = PasswordNumpadDialog(self, max_length=4)  # 4 haneli şifre
+            if dlg.exec_() == QtWidgets.QDialog.Accepted:
+                self._password_value = dlg.value() or ""
+                # EchoMode=Password olduğu için maskelenmiş görünecek:
+                self.password.setText(self._password_value)
+            # QLineEdit'in normal davranışı bozulmasın:
+            if event is not None:
+                QtWidgets.QLineEdit.mousePressEvent(self.password, event)
+
+        # QLineEdit'e tıklama handler'ını bağla
+        self.password.mousePressEvent = _open_password_numpad
 
         # Login button
         self.login_btn = QtWidgets.QPushButton("Giriş Yap")
@@ -757,7 +1314,7 @@ class ModernMainWindow(QtWidgets.QMainWindow):
         bottom_layout.addWidget(self.status)
 
         # Demo credentials info
-        demo_info = QtWidgets.QLabel("Demo Hesap: admin / admin")
+        demo_info = QtWidgets.QLabel("Demo Hesap: admin / 1234")
         demo_info.setStyleSheet("""
             color: #6b7280;
             font-size: 12px;
@@ -773,23 +1330,7 @@ class ModernMainWindow(QtWidgets.QMainWindow):
         bottom_layout.addStretch()
         main_layout.addWidget(bottom_section)
 
-    def svg_icon(self, name):
-        # Returns a QPixmap SVG icon (user/lock)
-        svg_data = {
-            "user": '''<svg width="24" height="24" fill="none" stroke="#6366f1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><circle cx="12" cy="7" r="4"/><path d="M5.5 21a7.5 7.5 0 0 1 13 0"/></svg>''',
-            "lock": '''<svg width="24" height="24" fill="none" stroke="#6366f1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>''',
-        }
-        svg = svg_data.get(name, "")
-        if not svg:
-            return QtGui.QPixmap()
-        svg_bytes = QtCore.QByteArray(svg.encode("utf-8"))
-        pixmap = QtGui.QPixmap(24, 24)
-        pixmap.fill(QtCore.Qt.transparent)
-        painter = QtGui.QPainter(pixmap)
-        renderer = QSvgRenderer(svg_bytes)
-        renderer.render(painter)
-        painter.end()
-        return pixmap
+
 
     def mobile_input_style(self):
         return """
@@ -861,11 +1402,10 @@ class ModernMainWindow(QtWidgets.QMainWindow):
                 "QPushButton:hover {"
                 "background: qlineargradient(x1:0, y1:0, x2:1, y2:1, "
                 "stop:0 #5855eb, stop:1 #7c3aed);"
-                "transform: translateY(-2px);"
-                "box-shadow: 0 10px 25px rgba(99, 102, 241, 0.4);"
+                "padding: 14px 0;"
                 "}"
                 "QPushButton:pressed {"
-                "transform: translateY(0px);"
+                "padding: 16px 0;"
                 "}"
             )
         else:
@@ -883,7 +1423,7 @@ class ModernMainWindow(QtWidgets.QMainWindow):
                 "background: rgba(255, 255, 255, 0.1);"
                 "border: 1px solid rgba(99, 102, 241, 0.5);"
                 "color: #6366f1;"
-                "transform: translateY(-2px);"
+                "padding: 12px 0;"
                 "}"
             )
 
@@ -892,12 +1432,12 @@ class ModernMainWindow(QtWidgets.QMainWindow):
         try:
             conn = sqlite3.connect(self.database_path)
             cursor = conn.cursor()
-            cursor.execute('SELECT id, password, name, balance FROM customers WHERE id = ?', (username,))
+            cursor.execute('SELECT id, password, name, balance, investment_balance FROM customers WHERE id = ?', (username,))
             result = cursor.fetchone()
             conn.close()
             
             if result and result[1] == password:
-                return Customer(result[0], result[1], result[2], result[3])
+                return Customer(result[0], result[1], result[2], result[3], result[4] if len(result) > 4 else 0)
             return None
         except Exception as e:
             print(f"Database error: {e}")
@@ -905,7 +1445,7 @@ class ModernMainWindow(QtWidgets.QMainWindow):
 
     def handle_login(self):
         username = self.username.text().strip()
-        password = self.password.text().strip()
+        password = self._password_value
         
         if not username or not password:
             self.status.setText("Lütfen kullanıcı adı ve şifre girin.")
@@ -917,6 +1457,8 @@ class ModernMainWindow(QtWidgets.QMainWindow):
             self.show_main_menu()
         else:
             self.status.setText("Hatalı kullanıcı adı veya şifre.")
+            self._password_value = ""  # Şifreyi temizle
+            self.password.setText("")  # Alanı da temizle
     
     def show_main_menu(self):
         """Show the main banking menu after successful login"""
@@ -1005,8 +1547,8 @@ class MainMenuWindow(QtWidgets.QMainWindow):
         balance_layout = QtWidgets.QVBoxLayout(balance_card)
         balance_layout.setContentsMargins(20, 15, 20, 15)
         
-        balance_title = QtWidgets.QLabel("Toplam Bakiye")
-        balance_title.setStyleSheet("""
+        self.balance_title = QtWidgets.QLabel("Toplam Bakiye")
+        self.balance_title.setStyleSheet("""
             background: transparent;
             border: none;
             color: rgba(255, 255, 255, 0.8);
@@ -1023,7 +1565,7 @@ class MainMenuWindow(QtWidgets.QMainWindow):
             font-weight: 700;
         """)
         
-        balance_layout.addWidget(balance_title)
+        balance_layout.addWidget(self.balance_title)
         balance_layout.addWidget(self.balance_label)
         header_layout.addWidget(balance_card)
         
@@ -1040,31 +1582,37 @@ class MainMenuWindow(QtWidgets.QMainWindow):
         """)
         content_layout = QtWidgets.QVBoxLayout(content_section)
         content_layout.setContentsMargins(10, 10, 10, 10)
-        content_layout.setSpacing(20)
+        content_layout.setSpacing(0)
 
-        # Quick Actions title
+        # Sayfa yığını
+        self.pages = QtWidgets.QStackedWidget()
+        content_layout.addWidget(self.pages)
+
+        # --- SAYFA 0: ANA (Hızlı İşlemler) ---
+        home_page = QtWidgets.QWidget()
+        home_layout = QtWidgets.QVBoxLayout(home_page)
+        home_layout.setContentsMargins(10, 10, 10, 10)
+        home_layout.setSpacing(20)
+
         actions_title = QtWidgets.QLabel("Hızlı İşlemler")
         actions_title.setStyleSheet("""
             color: #1f2937;
             font-size: 18px;
             font-weight: 600;
         """)
-        content_layout.addWidget(actions_title)
+        home_layout.addWidget(actions_title)
 
-        # Action buttons in a grid
         actions_container = QtWidgets.QWidget()
         actions_grid = QtWidgets.QGridLayout(actions_container)
         actions_grid.setSpacing(10)
         actions_grid.setContentsMargins(0, 0, 0, 0)
 
-        # Banking actions
+        # Ana sayfa hızlı işlemler
         actions = [
-            ("💰", "Bakiye", self.check_balance),
             ("💳", "Para Yatır", self.deposit_money),
             ("💸", "Para Çek", self.withdraw_money),
             ("🔄", "Transfer", self.transfer_money),
-            ("📈", "Yatırım", self.stock_prices),
-            ("💱", "Döviz", self.currency_rates)
+            ("📈", "Yatırım", self.open_investments_menu),
         ]
 
         for i, (icon, text, callback) in enumerate(actions):
@@ -1073,13 +1621,10 @@ class MainMenuWindow(QtWidgets.QMainWindow):
             col = i % 2
             actions_grid.addWidget(action_btn, row, col)
 
-        # Set equal column stretches
         actions_grid.setColumnStretch(0, 1)
         actions_grid.setColumnStretch(1, 1)
-        
-        content_layout.addWidget(actions_container)
-        
-        # Account section
+        home_layout.addWidget(actions_container)
+
         account_title = QtWidgets.QLabel("Hesap")
         account_title.setStyleSheet("""
             color: #1f2937;
@@ -1087,17 +1632,26 @@ class MainMenuWindow(QtWidgets.QMainWindow):
             font-weight: 600;
             margin-top: 20px;
         """)
-        content_layout.addWidget(account_title)
+        home_layout.addWidget(account_title)
 
-        # Account buttons
+        accounts_btn = self.create_list_item("🏦", "Hesaplarım", self.open_accounts_dialog)
         account_info_btn = self.create_list_item("👤", "Hesap Bilgileri", self.account_info)
         history_btn = self.create_list_item("📊", "İşlem Geçmişi", self.transaction_history)
-        
-        content_layout.addWidget(account_info_btn)
-        content_layout.addWidget(history_btn)
-        content_layout.addStretch()
+        home_layout.addWidget(accounts_btn)
+        home_layout.addWidget(account_info_btn)
+        home_layout.addWidget(history_btn)
+        home_layout.addStretch()
+
+        self.pages.addWidget(home_page)   # index 0
+
+        # --- SAYFA 1: YATIRIM ALT MENÜSÜ ---
+        investments_page = self.build_investments_page()
+        self.pages.addWidget(investments_page)  # index 1
 
         layout.addWidget(content_section)
+        
+        # İlk açılışta doğru başlığı göster
+        self.update_header_labels()
 
     def mobile_logout_style(self):
         return """
@@ -1131,18 +1685,15 @@ class MainMenuWindow(QtWidgets.QMainWindow):
                  text-align: center;
                  padding: 12px 8px;
                  margin: 5px;
-                 box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
              }
              QPushButton:hover {
                  background: #f8fafc;
                  border: 1px solid #3b82f6;
-                 transform: translateY(-2px);
-                 box-shadow: 0 4px 12px rgba(59, 130, 246, 0.15);
+                 margin: 3px;
              }
              QPushButton:pressed {
                  background: #f1f5f9;
-                 transform: translateY(0px);
-                 box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+                 margin: 5px;
              }
          """)
          
@@ -1227,16 +1778,12 @@ class MainMenuWindow(QtWidgets.QMainWindow):
         card.setStyleSheet("""
             QFrame {
                 background: rgba(255, 255, 255, 0.08);
-                backdrop-filter: blur(20px);
                 border-radius: 20px;
                 border: 1px solid rgba(255, 255, 255, 0.1);
-                box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
             }
             QFrame:hover {
                 background: rgba(255, 255, 255, 0.12);
                 border: 1px solid rgba(99, 102, 241, 0.3);
-                transform: translateY(-5px);
-                box-shadow: 0 12px 40px rgba(99, 102, 241, 0.15);
             }
         """)
         card.setFixedHeight(280)
@@ -1281,7 +1828,7 @@ class MainMenuWindow(QtWidgets.QMainWindow):
                 background: rgba(99, 102, 241, 0.1);
                 border: 1px solid rgba(99, 102, 241, 0.3);
                 color: #6366f1;
-                transform: translateX(4px);
+                padding-left: 20px;
             }
         """
 
@@ -1299,8 +1846,7 @@ class MainMenuWindow(QtWidgets.QMainWindow):
             QPushButton:hover {
                 background: rgba(239, 68, 68, 0.2);
                 border: 1px solid #ef4444;
-                transform: translateY(-2px);
-                box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);
+                margin: 2px;
             }
         """
 
@@ -1330,6 +1876,13 @@ class MainMenuWindow(QtWidgets.QMainWindow):
                 cursor = conn.cursor()
                 new_balance = self.customer.balance + amount
                 cursor.execute('UPDATE customers SET balance = ? WHERE id = ?', (new_balance, self.customer.id))
+                
+                # İşlem geçmişine kaydet
+                cursor.execute('''
+                    INSERT INTO transactions (customer_id, transaction_type, amount, description)
+                    VALUES (?, ?, ?, ?)
+                ''', (self.customer.id, 'DEPOSIT', amount, f'Para yatırma işlemi'))
+                
                 conn.commit()
                 conn.close()
                 self.customer.balance = new_balance
@@ -1347,6 +1900,13 @@ class MainMenuWindow(QtWidgets.QMainWindow):
                     cursor = conn.cursor()
                     new_balance = self.customer.balance - amount
                     cursor.execute('UPDATE customers SET balance = ? WHERE id = ?', (new_balance, self.customer.id))
+                    
+                    # İşlem geçmişine kaydet
+                    cursor.execute('''
+                        INSERT INTO transactions (customer_id, transaction_type, amount, description)
+                        VALUES (?, ?, ?, ?)
+                    ''', (self.customer.id, 'WITHDRAW', amount, f'Para çekme işlemi'))
+                    
                     conn.commit()
                     conn.close()
                     self.customer.balance = new_balance
@@ -1363,9 +1923,19 @@ class MainMenuWindow(QtWidgets.QMainWindow):
             self.update_balance()
 
     def stock_prices(self):
-        symbols = ("AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "TSLA", "BABA", "META", "NFLX", "AMD", "CRM", "ORCL")
+        # Varsayılan BIST sembolleri (.IS)
+        default_syms = "XU100.IS,THYAO.IS,ASELS.IS,BIMAS.IS,SISE.IS,GARAN.IS,AKBNK.IS,TUPRS.IS,EREGL.IS,PGSUS.IS,YKBNK.IS,HEKTS.IS"
+        text, ok = QtWidgets.QInputDialog.getText(
+            self,
+            "Borsa Sembolleri",
+            "Semboller (virgülle ayırın, BIST için '.IS' ekleyin):",
+            text=default_syms
+        )
+        if not ok:
+            return
+        symbols = [s.strip() for s in text.split(",") if s.strip()]
         try:
-            quotes = fetch_stock_quotes(symbols)
+            quotes = fetch_stock_quotes(tuple(symbols))
             if not quotes:
                 AppMessageDialog.show_warning(self, "Hisse Senetleri", "Veri alınamadı.")
                 return
@@ -1380,20 +1950,90 @@ class MainMenuWindow(QtWidgets.QMainWindow):
             if not rates:
                 AppMessageDialog.show_warning(self, "Döviz Kurları", "Kurlar alınamadı.")
                 return
-            lines = [f"1 {code} = {value:.4f} TL" for code, value in rates.items()]
-            AppMessageDialog.show_info(self, "Döviz Kurları", "\n".join(lines))
+            
+            # Döviz kodlarını Türkçe isimlerle eşleştir
+            currency_names = {
+                "USD": "Amerikan Doları",
+                "EUR": "Euro", 
+                "GBP": "İngiliz Sterlini"
+            }
+            
+            lines = ["📊 GÜNCEL DÖVİZ KURLARI\n"]
+            for code, value in rates.items():
+                name = currency_names.get(code, code)
+                # Alış fiyatı %0.5 düşük, satış fiyatı %0.5 yüksek
+                buy_rate = value * 0.995
+                sell_rate = value * 1.005
+                lines.append(f"{name} ({code})")
+                lines.append(f"  💰 Alış: {buy_rate:.4f} TL")
+                lines.append(f"  💸 Satış: {sell_rate:.4f} TL")
+                lines.append("")  # Boş satır
+            
+            AppMessageDialog.show_info(self, "Döviz Kurları", "\n".join(lines[:-1]))  # Son boş satırı çıkar
         except Exception as e:
             AppMessageDialog.show_error(self, "Döviz Kurları", f"Kurlar alınamadı: {e}")
 
-    def currency_converter(self):
-        AppMessageDialog.show_info(self, "Döviz Çevirici", "Döviz çevirici özelliği geliştiriliyor...")
+    def precious_metals(self):
+        try:
+            metals = fetch_precious_metals()
+            if not metals:
+                AppMessageDialog.show_warning(self, "Kıymetli Madenler", "Veriler alınamadı.")
+                return
+            
+            # Döviz kurunu al (USD/TRY)
+            usd_rates = fetch_currency_rates(symbols=("USD",))
+            usd_rate = usd_rates.get("USD", 34.0)  # Fallback rate
+            
+            lines = ["🥇 KIYMETLİ MADEN FİYATLARI\n"]
+            
+            # Metal ikonları
+            metal_icons = {
+                "XAU": "🥇",  # Altın
+                "XAG": "🥈",  # Gümüş
+                "XPT": "⚪",  # Platin
+                "XPD": "⚫"   # Paladyum
+            }
+            
+            for code, data in metals.items():
+                name = data.get("name", code)
+                price_usd = data.get("price", 0)
+                unit = data.get("unit", "ons")
+                icon = metal_icons.get(code, "🔶")
+                
+                # USD ve TRY fiyatları (ons bazında)
+                price_try = price_usd * usd_rate
+                
+                # Gram bazında fiyatlar (1 ons = 31.1 gram)
+                price_usd_gram = price_usd / 31.1
+                price_try_gram = price_try / 31.1
+                
+                lines.append(f"{icon} {name} ({code})")
+                lines.append(f"  💵 {price_usd:.2f} USD/ons • {price_usd_gram:.2f} USD/gram")
+                lines.append(f"  💰 {price_try:.2f} TL/ons • {price_try_gram:.2f} TL/gram")
+                lines.append("")  # Boş satır
+            
+            AppMessageDialog.show_info(self, "Kıymetli Madenler", "\n".join(lines[:-1]))  # Son boş satırı çıkar
+        except Exception as e:
+            AppMessageDialog.show_error(self, "Kıymetli Madenler", f"Veriler alınamadı: {e}")
+
+    def crypto_prices(self):
+        try:
+            cryptos = fetch_crypto_prices()
+            if not cryptos:
+                AppMessageDialog.show_warning(self, "Kripto Para", "Veriler alınamadı.")
+                return
+            dialog = CryptoListDialog(self, cryptos)
+            dialog.exec_()
+        except Exception as e:
+            AppMessageDialog.show_error(self, "Kripto Para", f"Veriler alınamadı: {e}")
 
     def account_info(self):
         info = f"Kullanıcı ID: {self.customer.id}\nİsim: {self.customer.name}\nBakiye: {self.customer.balance} TL"
         AppMessageDialog.show_info(self, "Hesap Bilgileri", info)
 
     def transaction_history(self):
-        QtWidgets.QMessageBox.information(self, "İşlem Geçmişi", "İşlem geçmişi özelliği geliştiriliyor...")
+        dialog = TransactionHistoryDialog(self, self.customer, self.database_path)
+        dialog.exec_()
 
     def logout(self):
         confirmed = AppMessageDialog.show_question(self, "Çıkış", "Çıkış yapmak istediğinizden emin misiniz?")
@@ -1402,6 +2042,104 @@ class MainMenuWindow(QtWidgets.QMainWindow):
             login_window = ModernMainWindow()
             login_window.show()
 
+    def build_investments_page(self):
+        """Yatırım alt menüsü: Döviz, Hisse, Kıymetli Madenler, Çevirici vb."""
+        page = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(page)
+        v.setContentsMargins(10, 10, 10, 10)
+        v.setSpacing(16)
+
+        # Üst çubuk: Geri + Başlık
+        top = QtWidgets.QHBoxLayout()
+        back_btn = QtWidgets.QPushButton("‹ Geri")
+        back_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        back_btn.setFixedHeight(34)
+        back_btn.setStyleSheet("""
+            QPushButton {
+                background: #f3f4f6; color: #374151;
+                border: 1px solid #e5e7eb; border-radius: 8px;
+                padding: 0 12px; font-weight: 600;
+            }
+            QPushButton:hover { background: #e5e7eb; }
+        """)
+        back_btn.clicked.connect(self.go_home)
+
+        title = QtWidgets.QLabel("Yatırım")
+        title.setStyleSheet("color:#1f2937; font-size:18px; font-weight:700;")
+        title.setAlignment(QtCore.Qt.AlignCenter)
+
+        top.addWidget(back_btn)
+        top.addStretch()
+        top.addWidget(title)
+        top.addStretch()
+        top.addSpacing(46)  # başlık ortalansın diye back_btn genişliği kadar boşluk
+        v.addLayout(top)
+
+        # Alt menü grid
+        grid_wrap = QtWidgets.QWidget()
+        grid = QtWidgets.QGridLayout(grid_wrap)
+        grid.setSpacing(10)
+        grid.setContentsMargins(0, 0, 0, 0)
+
+        items = [
+            ("💱", "Döviz Kurları", self.currency_rates),
+            ("📈", "Hisse Senetleri", self.stock_prices),
+            ("🪙", "Kıymetli Madenler", self.precious_metals),
+            ("₿", "Kripto Para", self.crypto_prices),
+            # İsteğe bağlı ekler:
+            # ("📊", "Portföy Özeti", lambda: AppMessageDialog.show_info(self, "Portföy", "Yakında...")),
+        ]
+
+        for i, (icon, text, cb) in enumerate(items):
+            btn = self.create_action_button(icon, text, cb)
+            row, col = divmod(i, 2)
+            grid.addWidget(btn, row, col)
+
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        v.addWidget(grid_wrap)
+        v.addStretch()
+
+        return page
+
+    def update_header_labels(self):
+        # Sayfa durumuna göre hangi bakiyeyi göstereceğimizi seç
+        if getattr(self.pages, "currentIndex", lambda:0)() == 1:
+            # Yatırım alt menüsü
+            self.balance_title.setText("Toplam Yatırım Bakiyesi")
+            self.balance_label.setText(f"{self.customer.investment_balance:,} TL")
+        else:
+            self.balance_title.setText("Toplam Bakiye")
+            self.balance_label.setText(f"{self.customer.balance:,} TL")
+
+    def refresh_balances_from_db(self):
+        try:
+            conn = sqlite3.connect(self.database_path)
+            cur = conn.cursor()
+            cur.execute('SELECT balance, investment_balance FROM customers WHERE id = ?', (self.customer.id,))
+            row = cur.fetchone()
+            conn.close()
+            if row:
+                self.customer.balance = row[0]
+                self.customer.investment_balance = row[1]
+                self.update_header_labels()
+        except Exception as e:
+            print("Balance refresh error:", e)
+
+    def open_investments_menu(self):
+        """Yatırım alt menüsüne geç"""
+        self.pages.setCurrentIndex(1)
+        self.update_header_labels()
+
+    def go_home(self):
+        """Ana sayfaya dön"""
+        self.pages.setCurrentIndex(0)
+        self.update_header_labels()
+
+    def open_accounts_dialog(self):
+        dlg = AccountsDialog(self)
+        dlg.exec_()
+
 
 class TransferDialog(QtWidgets.QDialog):
     def __init__(self, customer, database_path):
@@ -1409,7 +2147,7 @@ class TransferDialog(QtWidgets.QDialog):
         self.customer = customer
         self.database_path = database_path
         self.setWindowTitle("Para Transfer")
-        self.setFixedSize(400, 200)
+        self.setFixedSize(400, 240)
         self.setStyleSheet("""
             QDialog {
                 background: white;
@@ -1526,6 +2264,18 @@ class TransferDialog(QtWidgets.QDialog):
             cursor.execute('UPDATE customers SET balance = ? WHERE id = ?', (new_sender_balance, self.customer.id))
             cursor.execute('UPDATE customers SET balance = ? WHERE id = ?', (new_target_balance, target_id))
             
+            # Gönderen için işlem geçmişine kaydet
+            cursor.execute('''
+                INSERT INTO transactions (customer_id, transaction_type, amount, target_customer, description)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (self.customer.id, 'TRANSFER_OUT', amount, target_id, f'{target[1]} kullanıcısına transfer'))
+            
+            # Alıcı için işlem geçmişine kaydet
+            cursor.execute('''
+                INSERT INTO transactions (customer_id, transaction_type, amount, target_customer, description)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (target_id, 'TRANSFER_IN', amount, self.customer.id, f'{self.customer.name} kullanıcısından transfer'))
+            
             conn.commit()
             conn.close()
             
@@ -1534,6 +2284,178 @@ class TransferDialog(QtWidgets.QDialog):
             
         except Exception as e:
             AppMessageDialog.show_error(self, "Hata", f"Transfer gerçekleştirilemedi: {e}")
+
+
+class TransactionHistoryDialog(QtWidgets.QDialog):
+    def __init__(self, parent, customer, database_path):
+        super().__init__(parent)
+        self.customer = customer
+        self.database_path = database_path
+        self.setModal(True)
+        self.setWindowFlags(QtCore.Qt.FramelessWindowHint | QtCore.Qt.Dialog)
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+
+        # full overlay sized to parent
+        if parent is not None:
+            self.resize(parent.width(), parent.height())
+            self.move(parent.mapToGlobal(QtCore.QPoint(0, 0)))
+
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.addStretch()
+
+        row = QtWidgets.QHBoxLayout()
+        row.addStretch()
+
+        card = QtWidgets.QFrame()
+        card.setStyleSheet("QFrame { background: white; border-radius: 16px; }")
+        card.setFixedSize(520, 650)
+        v = QtWidgets.QVBoxLayout(card)
+        v.setContentsMargins(16, 16, 16, 16)
+        v.setSpacing(10)
+
+        title = QtWidgets.QLabel("İşlem Geçmişi")
+        title.setAlignment(QtCore.Qt.AlignCenter)
+        title.setStyleSheet("color:#111827; font-size:18px; font-weight:700;")
+        v.addWidget(title)
+
+        table = QtWidgets.QTableWidget()
+        table.setColumnCount(5)
+        table.setHorizontalHeaderLabels(["Tarih", "İşlem", "Miktar", "Açıklama", "Durum"])
+        table.horizontalHeader().setStretchLastSection(True)
+        table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
+        table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        table.setAlternatingRowColors(True)
+        
+        table.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        table.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        table.setMinimumHeight(480)
+        
+        table.setStyleSheet("""
+            QTableWidget { 
+                background: white; 
+                color: #111827; 
+                gridline-color: #e5e7eb;
+                font-size: 11px;
+            }
+            QHeaderView::section { 
+                background: #f3f4f6; 
+                padding: 6px; 
+                border: none; 
+                font-weight: 600; 
+                font-size: 11px;
+            }
+            QTableWidget::item { 
+                padding: 6px; 
+                border-bottom: 1px solid #f3f4f6;
+            }
+        """)
+
+        # Load transactions
+        transactions = self.load_transactions()
+        table.setRowCount(len(transactions))
+        
+        for r, transaction in enumerate(transactions):
+            date_item = QtWidgets.QTableWidgetItem(transaction['date'])
+            type_item = QtWidgets.QTableWidgetItem(transaction['type'])
+            amount_item = QtWidgets.QTableWidgetItem(transaction['amount'])
+            desc_item = QtWidgets.QTableWidgetItem(transaction['description'])
+            status_item = QtWidgets.QTableWidgetItem(transaction['status'])
+
+            # Renklendirme
+            if transaction['transaction_type'] in ['DEPOSIT', 'TRANSFER_IN']:
+                amount_item.setForeground(QtGui.QBrush(QtGui.QColor("#10b981")))
+                status_item.setForeground(QtGui.QBrush(QtGui.QColor("#10b981")))
+            elif transaction['transaction_type'] in ['WITHDRAW', 'TRANSFER_OUT']:
+                amount_item.setForeground(QtGui.QBrush(QtGui.QColor("#ef4444")))
+                status_item.setForeground(QtGui.QBrush(QtGui.QColor("#ef4444")))
+
+            table.setItem(r, 0, date_item)
+            table.setItem(r, 1, type_item)
+            table.setItem(r, 2, amount_item)
+            table.setItem(r, 3, desc_item)
+            table.setItem(r, 4, status_item)
+
+        table.resizeRowsToContents()
+        table.resizeColumnsToContents()
+        
+        v.addWidget(table)
+
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_row.addStretch()
+        close_btn = QtWidgets.QPushButton("Kapat")
+        close_btn.setFixedHeight(36)
+        close_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        close_btn.setStyleSheet("QPushButton { background: #1e40af; color: white; border: none; border-radius: 8px; padding: 0 16px; font-weight: 600; }")
+        close_btn.clicked.connect(self.accept)
+        btn_row.addWidget(close_btn)
+        btn_row.addStretch()
+        v.addLayout(btn_row)
+
+        row.addWidget(card)
+        row.addStretch()
+        root.addLayout(row)
+        root.addStretch()
+        self.setStyleSheet("QDialog { background: rgba(0,0,0,0.45); }")
+
+    def load_transactions(self):
+        """Load transaction history from database"""
+        try:
+            conn = sqlite3.connect(self.database_path)
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT transaction_type, amount, target_customer, description, timestamp
+                FROM transactions 
+                WHERE customer_id = ? 
+                ORDER BY timestamp DESC 
+                LIMIT 50
+            ''', (self.customer.id,))
+            
+            results = cursor.fetchall()
+            conn.close()
+            
+            transactions = []
+            type_names = {
+                'DEPOSIT': 'Para Yatırma',
+                'WITHDRAW': 'Para Çekme',
+                'TRANSFER_OUT': 'Transfer (Giden)',
+                'TRANSFER_IN': 'Transfer (Gelen)'
+            }
+            
+            for result in results:
+                transaction_type, amount, target_customer, description, timestamp = result
+                
+                # Tarih formatı
+                try:
+                    from datetime import datetime
+                    dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                    formatted_date = dt.strftime('%d.%m.%Y %H:%M')
+                except:
+                    formatted_date = timestamp[:16]
+                
+                # Miktar formatı
+                if transaction_type in ['DEPOSIT', 'TRANSFER_IN']:
+                    amount_str = f"+{amount:,} TL"
+                    status = "✅ Başarılı"
+                else:
+                    amount_str = f"-{amount:,} TL"
+                    status = "✅ Başarılı"
+                
+                transactions.append({
+                    'date': formatted_date,
+                    'type': type_names.get(transaction_type, transaction_type),
+                    'amount': amount_str,
+                    'description': description,
+                    'status': status,
+                    'transaction_type': transaction_type
+                })
+                
+            return transactions
+            
+        except Exception as e:
+            print(f"Transaction history load error: {e}")
+            return []
 
 
 class RegisterDialog(QtWidgets.QDialog):
@@ -1685,8 +2607,8 @@ class RegisterDialog(QtWidgets.QDialog):
 
             # Create new customer
             cursor.execute('''
-                INSERT INTO customers (id, password, name, balance) VALUES (?, ?, ?, ?)
-            ''', (user_id, password, name, 0))
+                INSERT INTO customers (id, password, name, balance, investment_balance) VALUES (?, ?, ?, ?, ?)
+            ''', (user_id, password, name, 0, 0))
             
             conn.commit()
             conn.close()
@@ -1695,6 +2617,120 @@ class RegisterDialog(QtWidgets.QDialog):
             
         except Exception as e:
             AppMessageDialog.show_error(self, "Hata", f"Hesap oluşturulamadı: {e}")
+
+
+class AccountsDialog(QtWidgets.QDialog):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.parent = parent
+        self.setModal(True)
+        self.setWindowFlags(QtCore.Qt.FramelessWindowHint | QtCore.Qt.Dialog)
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+
+        # tam ekran overlay
+        self.resize(parent.width(), parent.height())
+        self.move(parent.mapToGlobal(QtCore.QPoint(0, 0)))
+
+        root = QtWidgets.QVBoxLayout(self); root.setContentsMargins(0,0,0,0)
+        root.addStretch()
+        row = QtWidgets.QHBoxLayout(); row.addStretch()
+
+        card = QtWidgets.QFrame()
+        card.setStyleSheet("QFrame { background: white; border-radius: 16px; }")
+        card.setFixedSize(420, 360)
+        v = QtWidgets.QVBoxLayout(card); v.setContentsMargins(16,16,16,16); v.setSpacing(12)
+
+        title = QtWidgets.QLabel("🏦 Hesaplarım")
+        title.setAlignment(QtCore.Qt.AlignCenter)
+        title.setStyleSheet("color:#111827; font-size:18px; font-weight:700;")
+        v.addWidget(title)
+
+        # Ana Hesap
+        main_box = QtWidgets.QGroupBox("Vadesiz (Ana Hesap)")
+        mv = QtWidgets.QVBoxLayout(main_box)
+        self.lbl_main = QtWidgets.QLabel()
+        self.lbl_main.setStyleSheet("font-size:16px; font-weight:700; color:#111827;")
+        mv.addWidget(self.lbl_main)
+
+        # Yatırım Hesabı
+        inv_box = QtWidgets.QGroupBox("Yatırım Hesabı")
+        iv = QtWidgets.QVBoxLayout(inv_box)
+        self.lbl_inv = QtWidgets.QLabel()
+        self.lbl_inv.setStyleSheet("font-size:16px; font-weight:700; color:#111827;")
+        iv.addWidget(self.lbl_inv)
+
+        v.addWidget(main_box)
+        v.addWidget(inv_box)
+
+        # (Opsiyonel) aralarında transfer
+        btns = QtWidgets.QHBoxLayout()
+        btn_m2i = QtWidgets.QPushButton("Ana → Yatırım")
+        btn_i2m = QtWidgets.QPushButton("Yatırım → Ana")
+        for b in (btn_m2i, btn_i2m):
+            b.setCursor(QtCore.Qt.PointingHandCursor)
+            b.setStyleSheet("QPushButton{background:#1e40af; color:white; border:none; border-radius:8px; padding:8px 12px; font-weight:600;}")
+        btn_m2i.clicked.connect(lambda: self._xfer("m2i"))
+        btn_i2m.clicked.connect(lambda: self._xfer("i2m"))
+        btns.addWidget(btn_m2i); btns.addWidget(btn_i2m)
+        v.addLayout(btns)
+
+        close_row = QtWidgets.QHBoxLayout(); close_row.addStretch()
+        close_btn = QtWidgets.QPushButton("Kapat")
+        close_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        close_btn.setStyleSheet("QPushButton{background:#e5e7eb; color:#374151; border:none; border-radius:8px; padding:8px 16px; font-weight:600;}")
+        close_btn.clicked.connect(self.accept)
+        close_row.addWidget(close_btn); close_row.addStretch()
+        v.addLayout(close_row)
+
+        row.addWidget(card); row.addStretch()
+        root.addLayout(row); root.addStretch()
+        self.setStyleSheet("QDialog { background: rgba(0,0,0,0.45); }")
+        self._refresh_labels()
+
+    def _refresh_labels(self):
+        c = self.parent.customer
+        self.lbl_main.setText(f"{c.balance:,} TL")
+        self.lbl_inv.setText(f"{c.investment_balance:,} TL")
+
+    def _xfer(self, direction):
+        amount, ok = AppNumberInputDialog.get_int(self, "Tutar", "Aktarılacak tutarı girin", minimum=1, maximum=10**9)
+        if not ok: 
+            return
+        c = self.parent.customer
+        main_bal, inv_bal = c.balance, c.investment_balance
+
+        if direction == "m2i":
+            if amount > main_bal:
+                AppMessageDialog.show_warning(self, "Uyarı", "Yetersiz bakiye (Ana Hesap)."); return
+            main_bal -= amount; inv_bal += amount
+        else:  # i2m
+            if amount > inv_bal:
+                AppMessageDialog.show_warning(self, "Uyarı", "Yetersiz bakiye (Yatırım Hesabı)."); return
+            inv_bal -= amount; main_bal += amount
+
+        try:
+            conn = sqlite3.connect(self.parent.database_path)
+            cur = conn.cursor()
+            cur.execute('UPDATE customers SET balance=?, investment_balance=? WHERE id=?',
+                        (main_bal, inv_bal, self.parent.customer.id))
+            
+            # İşlem kaydı ekle
+            tx_type = 'TRANSFER_OUT' if direction == 'm2i' else 'TRANSFER_IN'
+            desc = 'Hesap içi transfer: Ana → Yatırım' if direction == 'm2i' else 'Hesap içi transfer: Yatırım → Ana'
+            
+            cur.execute('''
+                INSERT INTO transactions (customer_id, transaction_type, amount, target_customer, description)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (self.parent.customer.id, tx_type, amount, self.parent.customer.id, desc))
+            
+            conn.commit(); conn.close()
+            # model + header güncelle
+            c.balance, c.investment_balance = main_bal, inv_bal
+            self.parent.update_header_labels()
+            self._refresh_labels()
+            AppMessageDialog.show_success(self, "Başarılı", "Transfer tamamlandı.")
+        except Exception as e:
+            AppMessageDialog.show_error(self, "Hata", f"İşlem başarısız: {e}")
 
 
 if __name__ == "__main__":
